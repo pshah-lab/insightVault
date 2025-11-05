@@ -1,6 +1,7 @@
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "react-hot-toast";
+import { ThemeProvider } from "next-themes";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,20 +14,25 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: "InsightVault Assistant",
-  description:
-    "An intelligent assistant that helps you query, analyze, and gain insights seamlessly.",
+  title: "InsightVault",
+  description: "AI-powered data assistant for insights",
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 text-gray-900`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased transition-colors duration-500 bg-gray-50 dark:bg-[#0e1117]`}
       >
-        {/* Global toast notifications */}
-        <Toaster position="top-right" toastOptions={{ duration: 3000 }} />
-        {children}
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem={true}
+          disableTransitionOnChange={false}
+        >
+          <Toaster position="top-right" reverseOrder={false} />
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );

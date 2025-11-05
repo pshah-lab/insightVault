@@ -12,33 +12,58 @@ const supabase = createClient(
 
 export async function POST(req) {
   try {
-    const { query } = await req.json();
+    const { query, documentText } = await req.json();
 
-    if (!query) {
+    if (!query && !documentText) {
       return Response.json(
-        { success: false, error: "Query is required" },
+        { success: false, error: "Either 'query' or 'documentText' is required" },
         { status: 400 }
       );
     }
 
     const startTime = Date.now();
 
-    // 🧠 Call OpenAI API
+    // ✂️ Truncate very large PDFs to avoid hitting token limits (keep first 10k chars)
+    const truncatedDoc =
+      documentText && documentText.length > 10000
+        ? documentText.slice(0, 10000) + "\n\n[...Truncated for brevity]"
+        : documentText;
+
+    // 🧠 Build the final LLM prompt dynamically
+    const finalPrompt = documentText
+      ? `You are analyzing a document uploaded by the user. 
+The document text is below:
+----------------------------------------
+${truncatedDoc}
+----------------------------------------
+
+Now, ${
+        query
+          ? `answer this specific query from the user:\n"${query}".`
+          : "provide a structured and concise summary of the document's key ideas, sections, and insights."
+      }
+
+Return your output in well-formatted paragraphs, using bullet points where useful.`
+      : query;
+
+    // ⚡ Call OpenAI
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // You can change this to "gpt-4o" if supported
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that answers user queries clearly.",
+          content:
+            "You are InsightVault — a helpful assistant that provides analytical, factual, and structured answers for user data or document queries.",
         },
-        { role: "user", content: query },
+        { role: "user", content: finalPrompt },
       ],
+      temperature: 0.7,
     });
 
-    const answer = completion.choices[0].message.content.trim();
+    const answer = completion.choices[0]?.message?.content?.trim() || "No response generated.";
     const latency = Date.now() - startTime;
 
-    // 💾 Insert AI response into 'responses'
+    // 💾 Save response in Supabase
     const { data: responseData, error: responseError } = await supabase
       .from("responses")
       .insert([{ content: answer, latency_ms: latency }])
@@ -47,39 +72,42 @@ export async function POST(req) {
 
     if (responseError) throw responseError;
 
-    // 💾 Insert user query into 'queries' referencing the response_id
+    // 💾 Save query referencing response
     const { error: queryError } = await supabase.from("queries").insert([
       {
-        question: query,
+        question: query || "[Document Analysis]",
         response_id: responseData.id,
       },
     ]);
 
     if (queryError) throw queryError;
 
+    // ✅ Respond success
     return Response.json({
       success: true,
       data: {
-        query,
+        query: query || "[Document Analysis]",
         response: answer,
         latency_ms: latency,
       },
     });
   } catch (error) {
-    console.error("OpenAI API error:", error);
+    console.error("OpenAI Query API error:", error);
 
-    // ⚠️ Graceful handling for OpenAI quota / rate limits
+    // ⚠️ Graceful handling for rate limits
     if (error.status === 429) {
       return Response.json({
         success: false,
-        message: "⚠️ API quota exceeded. Please check your billing or try again later.",
+        message:
+          "⚠️ API quota exceeded. Please check your OpenAI billing or try again later.",
       });
     }
 
-    // 🛠 Generic fallback
+    // 🧩 General fallback
     return Response.json({
       success: false,
-      message: "Something went wrong while processing your query. Please try again later.",
+      message:
+        "Something went wrong while processing your query. Please try again later.",
       error: error.message,
     });
   }
