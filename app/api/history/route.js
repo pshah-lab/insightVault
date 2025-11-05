@@ -70,23 +70,23 @@ export async function POST(req) {
 // 🧹 DELETE: Clear all history
 export async function DELETE() {
   try {
-    // First delete responses (since they reference queries)
-    const { error: responseError } = await supabase
-      .from("responses")
-      .delete()
-      .neq("id", 0);
-    if (responseError) throw responseError;
-
-    // Then delete queries
+    // ✅ First delete from queries (they reference responses)
     const { error: queryError } = await supabase
       .from("queries")
       .delete()
-      .neq("id", 0);
+      .not("id", "is", null); // safely delete all UUIDs
     if (queryError) throw queryError;
+
+    // ✅ Then delete from responses
+    const { error: responseError } = await supabase
+      .from("responses")
+      .delete()
+      .not("id", "is", null);
+    if (responseError) throw responseError;
 
     return Response.json({
       success: true,
-      message: "All query history cleared!",
+      message: "✅ All query history cleared successfully!",
     });
   } catch (error) {
     console.error("Error clearing history:", error.message);
