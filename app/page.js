@@ -18,6 +18,7 @@ export default function Home() {
   const [refreshingHistory, setRefreshingHistory] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [refreshDocs, setRefreshDocs] = useState(0);
 
   // ✅ Fetch query history
   const fetchHistory = async () => {
@@ -247,11 +248,13 @@ export default function Home() {
             {/* 📎 PDF Upload Section */}
             <div className="mt-6">
               <UploadPDF
-                onUploadComplete={() =>
-                  toast.success("Document parsed successfully!")
-                }
+                onUploadComplete={() => {
+                  toast.success("Document parsed successfully!");
+                  setRefreshDocs((n) => n + 1); // 🔁 trigger refresh
+                }}
               />
-              <DocumentLibrary />
+
+              <DocumentLibrary key={refreshDocs} />
             </div>
 
             {/* 🧠 Response */}

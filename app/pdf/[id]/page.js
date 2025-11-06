@@ -41,7 +41,7 @@ export default function PDFChatPage() {
     fetchDoc();
   }, [id, router]);
 
-  // 🧠 Generate AI summary (if not already available)
+  // 🧠 Generate AI summary (RAG-powered)
   const generateSummary = async () => {
     if (!doc) return;
     setAnalyzing(true);
@@ -52,8 +52,8 @@ export default function PDFChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          documentText: doc.text,
           query: `Summarize and analyze the document "${doc.filename}" clearly and concisely.`,
+          documentId: doc.id, // ✅ Use documentId instead of full text
         }),
       });
 
@@ -63,6 +63,13 @@ export default function PDFChatPage() {
       if (data.success) {
         setSummary(data.data.response);
         toast.success("Summary generated!");
+
+        // Optionally, save summary in Supabase
+        await fetch("/api/documents", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: doc.id, summary: data.data.response }),
+        });
       } else {
         toast.error("Failed to summarize document.");
       }
@@ -88,8 +95,8 @@ export default function PDFChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          documentText: doc.text,
           query: chatInput,
+          documentId: doc.id, // ✅ use RAG-based retrieval
         }),
       });
 

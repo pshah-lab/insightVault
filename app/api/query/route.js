@@ -10,60 +10,109 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 );
 
+
 export async function POST(req) {
   try {
-    const { query, documentText } = await req.json();
+    const { query, documentText, documentId } = await req.json();
 
-    if (!query && !documentText) {
+    // 🛑 Ignore GraphQL introspection queries
+if (query?.includes("__schema") || query?.includes("IntrospectionQuery")) {
+  return Response.json({
+    success: false,
+    message: "GraphQL introspection query detected — ignoring.",
+  });
+}
+
+    if (!query && !documentText && !documentId) {
       return Response.json(
-        { success: false, error: "Either 'query' or 'documentText' is required" },
+        { success: false, error: "At least one of query, documentText, or documentId is required." },
         { status: 400 }
       );
     }
 
     const startTime = Date.now();
+    let contextText = "";
 
-    // ✂️ Truncate very large PDFs to avoid hitting token limits (keep first 10k chars)
-    const truncatedDoc =
-      documentText && documentText.length > 10000
-        ? documentText.slice(0, 10000) + "\n\n[...Truncated for brevity]"
-        : documentText;
+    // ⚡ Step 1: Retrieve semantic context via Supabase (RAG)
+    if (documentId && query) {
+      // 1️⃣ Generate embedding for the user's query
+      const embeddingResponse = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: query,
+      });
+      const queryEmbedding = embeddingResponse.data[0].embedding;
 
-    // 🧠 Build the final LLM prompt dynamically
-    const finalPrompt = documentText
-      ? `You are analyzing a document uploaded by the user. 
-The document text is below:
-----------------------------------------
-${truncatedDoc}
-----------------------------------------
+      // 2️⃣ Match most relevant chunks using your custom SQL function
+      const { data: matches, error: matchError } = await supabase.rpc(
+        "match_chunks",
+        {
+          query_embedding: queryEmbedding,
+          match_threshold: 0.7, // adjust sensitivity
+          match_count: 5, // top 5 similar chunks
+          document_id: documentId,
+        }
+      );
 
-Now, ${
-        query
-          ? `answer this specific query from the user:\n"${query}".`
-          : "provide a structured and concise summary of the document's key ideas, sections, and insights."
+      if (matchError) {
+        console.error("❌ Supabase RAG error:", matchError);
+        throw new Error("Failed to match document chunks");
       }
 
-Return your output in well-formatted paragraphs, using bullet points where useful.`
-      : query;
+      // 3️⃣ Combine matched chunks as context
+      contextText = matches
+        .map((chunk) => chunk.content)
+        .join("\n\n---\n\n")
+        .slice(0, 8000); // truncate to avoid token overflow
+    }
 
-    // ⚡ Call OpenAI
+    // 🧠 Step 2: Build the final GPT prompt
+    let finalPrompt = "";
+
+    if (documentText) {
+      // Classic document mode
+      finalPrompt = `Analyze the following document and answer accordingly:
+-------------------------
+${documentText.slice(0, 8000)}
+-------------------------
+User Query: ${query || "Summarize this document"}
+`;
+    } else if (documentId) {
+      // RAG mode
+      finalPrompt = `You are analyzing information retrieved from a document.
+Use the provided context to answer the user's question precisely.
+If the answer is not found in the context, respond with "The document does not contain that information."
+
+Context:
+-------------------------
+${contextText || "No relevant context found."}
+-------------------------
+
+User Query:
+"${query}"
+`;
+    } else {
+      // Fallback general query
+      finalPrompt = query;
+    }
+
+    // 🤖 Step 3: Call OpenAI Chat API
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.5,
       messages: [
         {
           role: "system",
           content:
-            "You are InsightVault — a helpful assistant that provides analytical, factual, and structured answers for user data or document queries.",
+            "You are InsightVault — a data-aware assistant that provides factual, structured, and clear answers.",
         },
         { role: "user", content: finalPrompt },
       ],
-      temperature: 0.7,
     });
 
     const answer = completion.choices[0]?.message?.content?.trim() || "No response generated.";
     const latency = Date.now() - startTime;
 
-    // 💾 Save response in Supabase
+    // 💾 Step 4: Save AI response
     const { data: responseData, error: responseError } = await supabase
       .from("responses")
       .insert([{ content: answer, latency_ms: latency }])
@@ -72,7 +121,7 @@ Return your output in well-formatted paragraphs, using bullet points where usefu
 
     if (responseError) throw responseError;
 
-    // 💾 Save query referencing response
+    // 💾 Step 5: Save query referencing response
     const { error: queryError } = await supabase.from("queries").insert([
       {
         question: query || "[Document Analysis]",
@@ -82,32 +131,30 @@ Return your output in well-formatted paragraphs, using bullet points where usefu
 
     if (queryError) throw queryError;
 
-    // ✅ Respond success
+    // ✅ Step 6: Return success
     return Response.json({
       success: true,
       data: {
-        query: query || "[Document Analysis]",
+        query,
         response: answer,
         latency_ms: latency,
+        contextUsed: documentId ? contextText?.slice(0, 400) : null,
       },
     });
   } catch (error) {
-    console.error("OpenAI Query API error:", error);
+    console.error("❌ OpenAI Query API error:", error);
 
-    // ⚠️ Graceful handling for rate limits
+    // ⚠️ Handle rate limits
     if (error.status === 429) {
       return Response.json({
         success: false,
-        message:
-          "⚠️ API quota exceeded. Please check your OpenAI billing or try again later.",
+        message: "⚠️ API quota exceeded. Please check your OpenAI billing or try again later.",
       });
     }
 
-    // 🧩 General fallback
     return Response.json({
       success: false,
-      message:
-        "Something went wrong while processing your query. Please try again later.",
+      message: "Something went wrong while processing your query.",
       error: error.message,
     });
   }
