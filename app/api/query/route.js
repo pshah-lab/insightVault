@@ -1,27 +1,36 @@
-import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
+import { openai } from "@/src/lib/openaiClient";
+import { getLLMClient, isRateLimitError, getLLMErrorMessage } from "@/src/lib/llmClient";
+import { generateEmbedding } from "@/src/lib/embeddingClient";
+import { supabase } from "@/src/lib/supabaseClient";
+import { checkRateLimit } from "@/src/lib/rateLimit";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
-
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_QUERY_LENGTH = 2000;
+const MAX_DOC_TEXT_LENGTH = 50000;
 
 export async function POST(req) {
+  // 🛡️ Rate limit check (max 40 queries per IP per minute)
+  const rateLimit = checkRateLimit(req, { limit: 40, windowMs: 60 * 1000, action: "query" });
+  if (!rateLimit.allowed) {
+    return Response.json(
+      { success: false, message: "Query rate limit exceeded. Please wait a moment before trying again." },
+      { status: 429 }
+    );
+  }
+
+  const { client: llm, model, provider } = getLLMClient();
+
   try {
-    const { query, documentText, documentId } = await req.json();
+    const body = await req.json().catch(() => ({}));
+    const { query, documentText, documentId } = body;
 
     // 🛑 Ignore GraphQL introspection queries
-if (query?.includes("__schema") || query?.includes("IntrospectionQuery")) {
-  return Response.json({
-    success: false,
-    message: "GraphQL introspection query detected — ignoring.",
-  });
-}
+    if (typeof query === "string" && (query.includes("__schema") || query.includes("IntrospectionQuery"))) {
+      return Response.json({
+        success: false,
+        message: "GraphQL introspection query detected — ignoring.",
+      });
+    }
 
     if (!query && !documentText && !documentId) {
       return Response.json(
@@ -30,25 +39,45 @@ if (query?.includes("__schema") || query?.includes("IntrospectionQuery")) {
       );
     }
 
+    // 🛡️ Input length validation
+    if (query && typeof query === "string" && query.length > MAX_QUERY_LENGTH) {
+      return Response.json(
+        { success: false, error: `Query exceeds maximum allowed length of ${MAX_QUERY_LENGTH} characters.` },
+        { status: 400 }
+      );
+    }
+
+    if (documentText && typeof documentText === "string" && documentText.length > MAX_DOC_TEXT_LENGTH) {
+      return Response.json(
+        { success: false, error: `Document text exceeds maximum allowed length of ${MAX_DOC_TEXT_LENGTH} characters.` },
+        { status: 400 }
+      );
+    }
+
+    // 🛡️ Document ID format validation
+    if (documentId && (typeof documentId !== "string" || !UUID_REGEX.test(documentId))) {
+      return Response.json(
+        { success: false, error: "Invalid documentId format. Must be a valid UUID." },
+        { status: 400 }
+      );
+    }
+
     const startTime = Date.now();
     let contextText = "";
+    let sources = [];
 
     // ⚡ Step 1: Retrieve semantic context via Supabase (RAG)
     if (documentId && query) {
-      // 1️⃣ Generate embedding for the user's query
-      const embeddingResponse = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: query,
-      });
-      const queryEmbedding = embeddingResponse.data[0].embedding;
+      // 1️⃣ Generate embedding for the user's query (HF -> Gemini -> OpenAI)
+      const { vector: queryEmbedding } = await generateEmbedding(query);
 
-      // 2️⃣ Match most relevant chunks using your custom SQL function
-      const { data: matches, error: matchError } = await supabase.rpc(
+      // 2️⃣ Match most relevant chunks using custom SQL function
+      let { data: matches, error: matchError } = await supabase.rpc(
         "match_chunks",
         {
           query_embedding: queryEmbedding,
-          match_threshold: 0.7, // adjust sensitivity
-          match_count: 5, // top 5 similar chunks
+          match_threshold: 0.2, // lowered sensitivity for embeddings
+          match_count: 6, // top 6 similar chunks
           document_id: documentId,
         }
       );
@@ -58,14 +87,58 @@ if (query?.includes("__schema") || query?.includes("IntrospectionQuery")) {
         throw new Error("Failed to match document chunks");
       }
 
-      // 3️⃣ Combine matched chunks as context
-      contextText = matches
-        .map((chunk) => chunk.content)
-        .join("\n\n---\n\n")
-        .slice(0, 8000); // truncate to avoid token overflow
+      // 🔄 Fallback 1: If no chunks met 0.2 threshold, retry with 0.0 threshold to get top candidates
+      if (!matches || matches.length === 0) {
+        console.log("ℹ️ No chunks met threshold 0.2, trying fallback with threshold 0.0");
+        const { data: fallbackMatches } = await supabase.rpc("match_chunks", {
+          query_embedding: queryEmbedding,
+          match_threshold: 0.0,
+          match_count: 6,
+          document_id: documentId,
+        });
+        if (fallbackMatches && fallbackMatches.length > 0) {
+          matches = fallbackMatches;
+        }
+      }
+
+      // 🔄 Fallback 2: If still no chunks (e.g. extreme mismatch), fetch first chunks directly from DB
+      if (!matches || matches.length === 0) {
+        console.log("ℹ️ No chunks from vector search, fetching raw document chunks as fallback");
+        const { data: directChunks } = await supabase
+          .from("document_chunks")
+          .select("id, content")
+          .eq("document_id", documentId)
+          .limit(6);
+
+        if (directChunks && directChunks.length > 0) {
+          matches = directChunks.map((chunk) => ({
+            id: chunk.id,
+            content: chunk.content,
+            similarity: null,
+          }));
+        }
+      }
+
+      // Format sources for citation preview in the UI
+      if (matches && matches.length > 0) {
+        sources = matches.map((chunk, idx) => ({
+          id: chunk.id || idx + 1,
+          content: chunk.content,
+          similarity:
+            chunk.similarity !== undefined && chunk.similarity !== null
+              ? Number(chunk.similarity.toFixed(3))
+              : null,
+        }));
+
+        // 3️⃣ Combine matched chunks as context
+        contextText = matches
+          .map((chunk) => chunk.content)
+          .join("\n\n---\n\n")
+          .slice(0, 8000); // truncate to avoid token overflow
+      }
     }
 
-    // 🧠 Step 2: Build the final GPT prompt
+    // 🧠 Step 2: Build the prompt
     let finalPrompt = "";
 
     if (documentText) {
@@ -95,10 +168,11 @@ User Query:
       finalPrompt = query;
     }
 
-    // 🤖 Step 3: Call OpenAI Chat API
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    // 🤖 Step 3: Call LLM API (Groq Llama 3.3 or OpenAI)
+    const completion = await llm.chat.completions.create({
+      model,
       temperature: 0.5,
+      max_tokens: 800, // Explicitly bound output tokens to stay within Groq free tier limits
       messages: [
         {
           role: "system",
@@ -131,31 +205,42 @@ User Query:
 
     if (queryError) throw queryError;
 
-    // ✅ Step 6: Return success
+    // ✅ Step 6: Return success with provider metadata
     return Response.json({
       success: true,
       data: {
         query,
         response: answer,
         latency_ms: latency,
+        provider,
+        model,
         contextUsed: documentId ? contextText?.slice(0, 400) : null,
+        sources: sources.length > 0 ? sources : null,
       },
     });
   } catch (error) {
-    console.error("❌ OpenAI Query API error:", error);
+    console.error(`❌ ${provider} Query API error:`, error);
 
     // ⚠️ Handle rate limits
-    if (error.status === 429) {
-      return Response.json({
-        success: false,
-        message: "⚠️ API quota exceeded. Please check your OpenAI billing or try again later.",
-      });
+    if (isRateLimitError(error)) {
+      return Response.json(
+        {
+          success: false,
+          isRateLimit: true,
+          message: getLLMErrorMessage(error, provider),
+          error: error.message || `${provider} rate limit or quota exceeded`,
+        },
+        { status: 429 }
+      );
     }
 
-    return Response.json({
-      success: false,
-      message: "Something went wrong while processing your query.",
-      error: error.message,
-    });
+    return Response.json(
+      {
+        success: false,
+        message: error.message || `Something went wrong while processing your query with ${provider}.`,
+        error: error.message,
+      },
+      { status: 500 }
+    );
   }
 }

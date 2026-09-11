@@ -1,51 +1,69 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import QueryHistory from "./components/QueryHistory";
+import { useCallback, useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import toast from "react-hot-toast";
 import UploadPDF from "./components/UploadPDF";
 import DocumentLibrary from "./components/DocumentLibrary";
-import toast from "react-hot-toast";
+import DatabaseSetupBanner from "./components/DatabaseSetupBanner";
 import LoadingShimmer from "./components/LoadingShimmer";
 import ThemeToggle from "./components/ThemeToggle";
+
+const SUGGESTIONS = [
+  "Summarize key insights and executive conclusions",
+  "Identify top risks, limitations, and anomalies",
+  "Extract quantitative metrics, stats, and milestones",
+  "List actionable recommendations from the uploaded documents",
+];
+
+const formatDate = (value) =>
+  new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
 export default function Home() {
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState("");
+  const [provider, setProvider] = useState("");
+  const [sources, setSources] = useState([]);
+  const [latency, setLatency] = useState(null);
+  const [showSources, setShowSources] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [history, setHistory] = useState([]);
-  const [refreshingHistory, setRefreshingHistory] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [refreshDocs, setRefreshDocs] = useState(0);
+  const [schemaMissing, setSchemaMissing] = useState(false);
+  const [activeTab, setActiveTab] = useState("chat");
 
-  // ✅ Fetch query history
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     try {
-      setRefreshingHistory(true);
       const res = await fetch("/api/history");
       const data = await res.json();
-      if (data.success) setHistory(data.data || []);
-      else setHistory([]);
+      if (data.isSchemaMissing) {
+        setSchemaMissing(true);
+        setHistory([]);
+        return;
+      }
+      setHistory(data.success ? data.data || [] : []);
     } catch (err) {
       console.error("Error fetching history:", err);
       setHistory([]);
-    } finally {
-      setRefreshingHistory(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchHistory();
-  }, []);
+  }, [fetchHistory]);
 
-  // ✅ Submit a new natural query
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event?.preventDefault();
+    if (!query.trim() || loading) return;
+
     setLoading(true);
     setError("");
     setResponse("");
+    setSources([]);
+    setLatency(null);
+    setShowSources(false);
 
     try {
       const res = await fetch("/api/query", {
@@ -53,260 +71,156 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
       });
-
       const data = await res.json();
 
-      if (data.success) {
-        setResponse(data.data?.response || data.message);
-        toast.success("Query processed successfully!");
-        fetchHistory();
-      } else {
-        setError(data.message || "Failed to get a response");
-        toast.error("Error: " + (data.message || "Failed to process query"));
+      if (!data.success) {
+        setError(data.message || "Failed to process query.");
+        toast.error(data.message || "Failed to process query.");
+        return;
       }
-    } catch (err) {
-      setError("Network error. Please try again later.");
+
+      setResponse(data.data?.response || data.message);
+      setSources(data.data?.sources || []);
+      setLatency(data.data?.latency_ms || null);
+      setProvider(data.data?.provider || "");
+      toast.success("Response ready");
+      fetchHistory();
+    } catch {
+      setError("Network error. Please try again.");
       toast.error("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  // ✅ Clear query history
   const handleClearHistory = async () => {
     try {
-      const res = await fetch("/api/history", { method: "DELETE" });
+      const res = await fetch("/api/history?confirm=true", { method: "DELETE" });
       const data = await res.json();
-
       if (data.success) {
-        toast.success("History cleared successfully!");
         setHistory([]);
+        toast.success("History cleared");
       } else {
-        toast.error("Failed to clear history: " + data.error);
+        toast.error(data.error || "Failed to clear history");
       }
     } catch (err) {
-      toast.error("Error while clearing history.");
+      toast.error("Error while clearing history");
       console.error(err);
     }
   };
 
-  return (
-    <div className="flex h-screen w-full bg-gradient-to-br from-gray-50 via-white to-blue-50">
-      {/* 🧭 Sidebar (Desktop) */}
-      <motion.aside
-        animate={{ width: sidebarOpen ? 300 : 60 }}
-        transition={{ duration: 0.4, ease: "easeInOut" }}
-        className="hidden md:flex flex-col bg-white/70 backdrop-blur-md border-r border-gray-200 shadow-lg h-full overflow-y-auto"
-      >
-        <div className="flex items-center justify-between p-4 border-b">
-          {sidebarOpen ? (
-            <h2 className="text-lg font-semibold text-gray-800">History</h2>
-          ) : (
-            <span className="font-bold text-blue-600 text-lg">IV</span>
-          )}
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="text-gray-500 hover:text-gray-700 transition"
-          >
-            {sidebarOpen ? "⏴" : "⏵"}
+  const copyResponse = async () => {
+    if (!response) return;
+    try {
+      await navigator.clipboard.writeText(response);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Failed to copy");
+    }
+  };
+
+  const selectHistory = (item) => {
+    setActiveTab("chat");
+    setQuery(item.question || "");
+    setMobileSidebar(false);
+  };
+
+  const sidebar = (
+    <div className="iv-sidebar-inner">
+      <div className="iv-brand-row">
+        <div className="iv-brand-mark">IV</div>
+        <div>
+          <div className="iv-brand-name">InsightVault</div>
+          <div className="iv-brand-caption">Research workspace</div>
+        </div>
+        <button className="iv-icon-button iv-mobile-close" onClick={() => setMobileSidebar(false)} aria-label="Close navigation">x</button>
+      </div>
+
+      <div className="iv-sidebar-label">Workspace</div>
+      <nav className="iv-nav" aria-label="Workspace navigation">
+        <button className={`iv-nav-item ${activeTab === "chat" ? "is-active" : ""}`} onClick={() => { setActiveTab("chat"); setMobileSidebar(false); }}>
+          <span className="iv-nav-symbol">/</span><span>Query assistant</span><span className="iv-nav-count">01</span>
+        </button>
+        <button className={`iv-nav-item ${activeTab === "vault" ? "is-active" : ""}`} onClick={() => { setActiveTab("vault"); setMobileSidebar(false); }}>
+          <span className="iv-nav-symbol">+</span><span>Document vault</span><span className="iv-nav-count">02</span>
+        </button>
+      </nav>
+
+      <div className="iv-sidebar-rule" />
+      <div className="iv-history-heading"><span className="iv-sidebar-label">Recent questions</span>{history.length > 0 && <button className="iv-text-button" onClick={handleClearHistory}>Clear</button>}</div>
+      <div className="iv-history-list">
+        {history.slice(0, 7).map((item) => (
+          <button className="iv-history-item" key={item.id} onClick={() => selectHistory(item)}>
+            <span className="iv-history-question">{item.question}</span><span className="iv-history-date">{formatDate(item.created_at)}</span>
           </button>
-        </div>
+        ))}
+        {!history.length && <p className="iv-history-empty">Your saved questions will appear here.</p>}
+      </div>
 
-        <div className="flex-1 p-3">
-          <AnimatePresence>
-            {sidebarOpen ? (
-              <QueryHistory
-                key="history-full"
-                history={history}
-                onClear={handleClearHistory}
-              />
-            ) : (
-              <motion.div
-                key="mini"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex flex-col items-center mt-6 gap-4 text-gray-600"
-              >
-                <button
-                  onClick={handleClearHistory}
-                  title="Clear History"
-                  className="p-2 hover:bg-red-100 text-red-500 rounded-lg"
-                >
-                  🧹
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </motion.aside>
+      <div className="iv-sidebar-footer"><div className="iv-status-dot" /><div><strong>RAG engine online</strong><span>Grounded answers enabled</span></div></div>
+    </div>
+  );
 
-      {/* 📱 Sidebar (Mobile Overlay) */}
+  return (
+    <div className="iv-app-shell">
+      <aside className="iv-sidebar">{sidebar}</aside>
       <AnimatePresence>
         {mobileSidebar && (
-          <motion.div
-            initial={{ x: -300 }}
-            animate={{ x: 0 }}
-            exit={{ x: -300 }}
-            transition={{ duration: 0.3 }}
-            className="fixed inset-0 bg-black/40 z-40 md:hidden"
-            onClick={() => setMobileSidebar(false)}
-          >
-            <motion.div
-              onClick={(e) => e.stopPropagation()}
-              className="absolute top-0 left-0 h-full w-72 bg-white/80 backdrop-blur-md shadow-xl border-r border-gray-200 p-4 overflow-y-auto"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-gray-800">History</h2>
-                <button
-                  onClick={() => setMobileSidebar(false)}
-                  className="text-gray-500 hover:text-gray-700 text-lg"
-                >
-                  ✖
-                </button>
-              </div>
-              <QueryHistory history={history} onClear={handleClearHistory} />
-            </motion.div>
+          <motion.div className="iv-mobile-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setMobileSidebar(false)}>
+            <motion.aside className="iv-mobile-sidebar" initial={{ x: -320 }} animate={{ x: 0 }} exit={{ x: -320 }} onClick={(event) => event.stopPropagation()}>{sidebar}</motion.aside>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* 💬 Main Chat Area */}
-      <main className="flex-1 flex flex-col items-center justify-start p-6 overflow-y-auto">
-        {/* Mobile Header */}
-        <div className="w-full flex justify-between items-center md:hidden mb-4">
-          <button
-            onClick={() => setMobileSidebar(true)}
-            className="bg-blue-600 text-white px-3 py-2 rounded-md shadow-md"
-          >
-            ☰
-          </button>
-          <h1 className="text-lg font-semibold text-gray-800">InsightVault</h1>
-        </div>
+      <main className="iv-main">
+        <header className="iv-topbar">
+          <div className="iv-topbar-left">
+            <button className="iv-menu-button" onClick={() => setMobileSidebar(true)} aria-label="Open navigation"><span /><span /></button>
+            <div className="iv-breadcrumb"><span>Workspace</span><b>/</b><strong>{activeTab === "chat" ? "Query assistant" : "Document vault"}</strong></div>
+          </div>
+          <div className="iv-topbar-actions"><span className="iv-live-status"><span /> Live system</span><ThemeToggle /></div>
+        </header>
 
-        <div className="absolute top-6 right-6 z-50">
-          <ThemeToggle />
-        </div>
+        <div className="iv-content">
+          {schemaMissing && <DatabaseSetupBanner onRetry={() => { fetchHistory(); setRefreshDocs((n) => n + 1); }} />}
 
-        {/* 🧠 Main Query Interface */}
-        <div className="w-full max-w-3xl">
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="text-center mb-8"
-          >
-            <h1 className="text-4xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-600">
-              InsightVault Assistant
-            </h1>
-            <p className="mt-3 text-sm text-gray-600 max-w-2xl mx-auto">
-              Ask data questions in natural language. We’ll analyze and respond
-              with clear insights.
-            </p>
-          </motion.div>
+          <section className="iv-page-intro">
+            <div><p className="iv-kicker">Private intelligence layer <span>01</span></p><h1>Ask better questions<br /><em>of your own knowledge.</em></h1></div>
+            <p className="iv-intro-copy">Search across your uploaded research, reports, and notes. Every answer stays anchored to the source material in your vault.</p>
+          </section>
 
-          <div className="bg-white/80 backdrop-blur rounded-2xl border shadow-xl p-5 sm:p-6">
-            {/* 📝 Query Form */}
-            <form onSubmit={handleSubmit} className="w-full">
-              <textarea
-                className="w-full text-gray-900 placeholder:text-gray-400 p-4 border border-gray-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 focus:border-blue-400 transition shadow-sm"
-                rows="4"
-                placeholder="e.g. Summarize the top anomalies from last week's metrics..."
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <div className="mt-3 flex items-center justify-between">
-                <span className="text-xs text-gray-500">
-                  {query.length}/2000
-                </span>
-                <button
-                  type="submit"
-                  disabled={loading || !query.trim()}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white font-medium shadow hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                >
-                  {loading ? (
-                    <>
-                      <span className="inline-block h-4 w-4 rounded-full border-2 border-white/60 border-t-transparent animate-spin" />
-                      Thinking...
-                    </>
-                  ) : (
-                    <>
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        fill="currentColor"
-                        className="h-4 w-4"
-                      >
-                        <path d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75S21.75 6.615 21.75 12 17.385 21.75 12 21.75 2.25 17.385 2.25 12Zm12.03-3.53a.75.75 0 1 0-1.06 1.06l1.72 1.72H8.25a.75.75 0 0 0 0 1.5h6.69l-1.72 1.72a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06l-3.25-3.25Z" />
-                      </svg>
-                      Submit
-                    </>
-                  )}
-                </button>
-              </div>
-            </form>
-
-            {/* 📎 PDF Upload Section */}
-            <div className="mt-6">
-              <UploadPDF
-                onUploadComplete={() => {
-                  toast.success("Document parsed successfully!");
-                  setRefreshDocs((n) => n + 1); // 🔁 trigger refresh
-                }}
-              />
-
-              <DocumentLibrary key={refreshDocs} />
-            </div>
-
-            {/* 🧠 Response */}
-            {error && (
-              <p className="text-red-600 bg-red-50 border border-red-100 rounded-md px-3 py-2 mt-4 text-sm">
-                {error}
-              </p>
-            )}
-
-            <div className="mt-4">
-              <AnimatePresence mode="wait">
-                {loading ? (
-                  <LoadingShimmer key="loading" />
-                ) : (
-                  response && (
-                    <motion.div
-                      key={response}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -20 }}
-                      transition={{ duration: 0.6, ease: "easeOut" }}
-                      className="p-4 bg-white border rounded-xl shadow-sm"
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <h2 className="font-semibold text-gray-800">
-                          Response
-                        </h2>
-                      </div>
-                      <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                        {response}
-                      </p>
-                    </motion.div>
-                  )
-                )}
-              </AnimatePresence>
-            </div>
+          <div className="iv-tab-strip" role="tablist" aria-label="Workspace views">
+            <button className={activeTab === "chat" ? "is-active" : ""} onClick={() => setActiveTab("chat")} role="tab" aria-selected={activeTab === "chat"}>Query assistant <span>⌘ 1</span></button>
+            <button className={activeTab === "vault" ? "is-active" : ""} onClick={() => setActiveTab("vault")} role="tab" aria-selected={activeTab === "vault"}>Document vault <span>⌘ 2</span></button>
           </div>
 
-          {/* Query History (Bottom for Mobile View) */}
-          <AnimatePresence>
-            {!refreshingHistory && history.length > 0 && (
-              <motion.div
-                key="history"
-                initial={{ opacity: 0, y: 30 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 30 }}
-                transition={{ duration: 0.5 }}
-                className="w-full mt-10"
-              >
-                <QueryHistory history={history} onClear={handleClearHistory} />
-              </motion.div>
-            )}
+          {activeTab === "chat" ? (
+            <section className="iv-chat-layout">
+              <div className="iv-query-column">
+                <div className="iv-section-meta"><span>Start a query</span><span className="iv-meta-line" /><span className="iv-muted">{query.length}/2000</span></div>
+                <form className="iv-query-panel" onSubmit={handleSubmit}>
+                  <textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); handleSubmit(); } }} placeholder="What would you like to understand?" rows="6" aria-label="Ask a question about your documents" />
+                  <div className="iv-query-footer"><span>⌘ + Enter to run</span><button type="submit" disabled={loading || !query.trim()}>{loading ? "Working..." : "Run query"}<span>→</span></button></div>
+                </form>
+                <div className="iv-suggestion-block"><div className="iv-section-meta"><span>Try a starting point</span><span className="iv-meta-line" /></div><div className="iv-suggestion-list">{SUGGESTIONS.map((suggestion) => <button key={suggestion} onClick={() => setQuery(suggestion)}><span>+</span>{suggestion}<b>↗</b></button>)}</div></div>
+              </div>
+              <aside className="iv-context-column">
+                <div className="iv-context-card"><div className="iv-context-top"><span className="iv-kicker">Vault context</span><span className="iv-context-index">A1</span></div><div className="iv-context-number">{history.length.toString().padStart(2, "0")}</div><h2>questions<br />answered</h2><p>Your query history is kept close by so research can continue from the last useful thread.</p><div className="iv-context-footer"><span>Source-grounded</span><span className="iv-status-dot" /></div></div>
+                <div className="iv-note-card"><span>Note</span><p>Responses are generated from the documents in your vault, not from a generic search index.</p></div>
+              </aside>
+            </section>
+          ) : (
+            <section className="iv-vault-view"><div className="iv-section-meta"><span>Ingest and manage</span><span className="iv-meta-line" /><span className="iv-muted">PDF / max 25 MB</span></div><UploadPDF onUploadComplete={() => setRefreshDocs((n) => n + 1)} /><DocumentLibrary key={refreshDocs} onSchemaMissing={setSchemaMissing} /></section>
+          )}
+
+          <AnimatePresence mode="wait">
+            {activeTab === "chat" && loading && <LoadingShimmer key="loading" />}
+            {activeTab === "chat" && error && <motion.div className="iv-error" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>{error}</motion.div>}
+            {activeTab === "chat" && response && !loading && <motion.section className="iv-response" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} key={response}>
+              <div className="iv-response-head"><div><span className="iv-kicker">Vault intelligence</span><span className="iv-response-title">Response</span></div><div className="iv-response-metrics"><span>{provider || "AI"}</span>{latency !== null && <span>{latency}ms</span>}<button onClick={copyResponse}>Copy</button></div></div>
+              <div className="iv-response-body">{response}</div>
+              {sources.length > 0 && <div className="iv-sources"><button onClick={() => setShowSources(!showSources)}>{showSources ? "Hide" : "Inspect"} {sources.length} grounded sources <span>{showSources ? "−" : "+"}</span></button>{showSources && <div className="iv-source-list">{sources.map((source, index) => <div className="iv-source" key={source.id || index}><span>Source {String(index + 1).padStart(2, "0")}</span><p>{source.content}</p></div>)}</div>}</div>}
+            </motion.section>}
           </AnimatePresence>
         </div>
       </main>

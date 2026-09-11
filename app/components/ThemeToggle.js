@@ -1,26 +1,40 @@
 "use client";
 
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { motion } from "framer-motion";
+
+const emptySubscribe = () => () => {};
 
 export default function ThemeToggle() {
   const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
+  );
 
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
+  if (!mounted) {
+    return (
+      <div
+        className="w-9 h-9 p-2 rounded-lg bg-white/70 dark:bg-white/10 backdrop-blur border border-gray-300 dark:border-gray-700 shadow-sm"
+        aria-hidden="true"
+      />
+    );
+  }
 
-  const toggle = () => setTheme(theme === "dark" ? "light" : "dark");
+  const isDark = theme === "dark";
+  const toggle = () => setTheme(isDark ? "light" : "dark");
 
   return (
     <motion.button
       whileTap={{ scale: 0.9 }}
       onClick={toggle}
-      className="p-2 rounded-lg bg-white/70 dark:bg-white/10 backdrop-blur border border-gray-300 dark:border-gray-700 shadow-sm hover:shadow-md transition"
-      title="Toggle theme"
+      className="p-2 rounded-lg bg-white/70 dark:bg-white/10 backdrop-blur border border-gray-300 dark:border-gray-700 shadow-sm hover:shadow-md transition text-base cursor-pointer"
+      title={`Switch to ${isDark ? "light" : "dark"} mode`}
+      aria-label="Toggle theme"
     >
-      {theme === "dark" ? (
+      {isDark ? (
         <span className="text-yellow-400">🌞</span>
       ) : (
         <span className="text-gray-800">🌙</span>

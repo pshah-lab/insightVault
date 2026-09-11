@@ -18,10 +18,22 @@ export async function GET() {
 
     return Response.json({ success: true, data });
   } catch (error) {
+    const isSchemaMissing =
+      error.message?.includes("schema cache") ||
+      error.message?.includes("relation") ||
+      error.message?.includes("does not exist");
+
     console.error("Error fetching history:", error.message);
-    return Response.json({ success: false, error: error.message });
+    return Response.json({
+      success: false,
+      isSchemaMissing,
+      error: isSchemaMissing
+        ? "Supabase tables not initialized. Please run supabase-schema.sql."
+        : error.message,
+    });
   }
 }
+
 export async function POST(req) {
   try {
     const { question, response } = await req.json();
@@ -51,7 +63,7 @@ export async function POST(req) {
     const { error: queryError } = await supabase.from("queries").insert([
       {
         question,
-        response_id: responseData.id, // ✅ Now the correct relationship
+        response_id: responseData.id,
       },
     ]);
 
@@ -67,14 +79,27 @@ export async function POST(req) {
   }
 }
 
-// 🧹 DELETE: Clear all history
-export async function DELETE() {
+// 🧹 DELETE: Clear all history (requires explicit ?confirm=true)
+export async function DELETE(req) {
   try {
+    const { searchParams } = new URL(req.url);
+    const confirmParam = searchParams.get("confirm");
+
+    if (confirmParam !== "true") {
+      return Response.json(
+        {
+          success: false,
+          error: "Global history deletion requires explicit confirmation parameter (?confirm=true).",
+        },
+        { status: 400 }
+      );
+    }
+
     // ✅ First delete from queries (they reference responses)
     const { error: queryError } = await supabase
       .from("queries")
       .delete()
-      .not("id", "is", null); // safely delete all UUIDs
+      .not("id", "is", null);
     if (queryError) throw queryError;
 
     // ✅ Then delete from responses
@@ -90,6 +115,6 @@ export async function DELETE() {
     });
   } catch (error) {
     console.error("Error clearing history:", error.message);
-    return Response.json({ success: false, error: error.message });
+    return Response.json({ success: false, error: error.message }, { status: 500 });
   }
 }
